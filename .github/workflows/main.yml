@@ -1,0 +1,166 @@
+name: 🖥️ RDP Multi-Platform Deploy
+
+on:
+  workflow_dispatch:
+    inputs:
+      device_type:
+        description: '🔧 Select Device Type'
+        required: true
+        type: choice
+        options:
+        - 'windows-latest'
+        - 'windows-2022'
+        - 'windows-2019'
+        - 'macos-latest'
+        - 'macos-13'
+        - 'macos-12'
+        default: 'windows-latest'
+      session_duration:
+        description: '⏰ Session Duration (minutes)'
+        required: false
+        default: '240'
+        type: choice
+        options:
+        - '30'
+        - '60'
+        - '120'
+        - '240'
+        - '480'
+        - '720'
+        - '1440'
+      script_version:
+        description: '📦 Script Version'
+        required: false
+        default: 'latest'
+        type: string
+      debug_mode:
+        description: '🐛 Enable Debug Mode'
+        required: false
+        default: false
+        type: boolean
+      auto_update:
+        description: '🔄 Auto Update Scripts'
+        required: false
+        default: true
+        type: boolean
+
+env:
+  SCRIPT_VERSION: ${{ github.event.inputs.script_version || 'latest' }}
+  DEBUG_MODE: ${{ github.event.inputs.debug_mode || 'false' }}
+  AUTO_UPDATE: ${{ github.event.inputs.auto_update || 'true' }}
+
+jobs:
+  deploy-rdp:
+    name: 🚀 Deploy RDP (${{ github.event.inputs.device_type }})
+    runs-on: ${{ github.event.inputs.device_type }}
+    timeout-minutes: ${{ fromJson(github.event.inputs.session_duration) }}
+    
+    steps:
+      - name: 📥 Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: 🔧 Initialize Environment
+        shell: bash
+        run: |
+          echo "DEVICE_TYPE=${{ github.event.inputs.device_type }}" >> $GITHUB_ENV
+          echo "SESSION_DURATION=${{ github.event.inputs.session_duration }}" >> $GITHUB_ENV
+          echo "RUNNER_OS=${{ runner.os }}" >> $GITHUB_ENV
+          echo "RUN_ID=${{ github.run_id }}" >> $GITHUB_ENV
+          echo "REPO_NAME=${{ github.repository }}" >> $GITHUB_ENV
+          echo "WORKFLOW_START_TIME=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> $GITHUB_ENV
+          
+          # Create log directory
+          mkdir -p logs
+          echo "📊 Environment initialized for ${{ runner.os }}" | tee logs/setup.log
+
+      - name: 🔍 Validate Prerequisites
+        shell: bash
+        run: |
+          echo "🔍 Validating prerequisites..."
+          
+          # Check Tailscale auth key
+          if [[ -z "${{ secrets.TAILSCALE_AUTH_KEY }}" ]]; then
+            echo "❌ TAILSCALE_AUTH_KEY secret not found!"
+            exit 1
+          fi
+          
+          # Check script permissions
+          chmod +x scripts/*.sh scripts/common/*.sh 2>/dev/null || true
+          
+          echo "✅ Prerequisites validated" | tee -a logs/setup.log
+
+      - name: 🪟 Execute Windows RDP Setup
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Continue"
+          Write-Host "🪟 Starting Windows RDP deployment..." -ForegroundColor Cyan
+          
+          # Execute Windows setup script
+          try {
+            & .\scripts\windows.sh -Verbose:$${{ env.DEBUG_MODE }}
+            echo "DEPLOYMENT_STATUS=SUCCESS" >> $env:GITHUB_ENV
+          } catch {
+            Write-Host "❌ Windows setup failed: $($_.Exception.Message)" -ForegroundColor Red
+            echo "DEPLOYMENT_STATUS=FAILED" >> $env:GITHUB_ENV
+            echo "ERROR_MESSAGE=$($_.Exception.Message)" >> $env:GITHUB_ENV
+          }
+        env:
+          TAILSCALE_AUTH_KEY: ${{ secrets.TAILSCALE_AUTH_KEY }}
+
+      - name: 🍎 Execute macOS VNC Setup
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          echo "🍎 Starting macOS VNC deployment..."
+          
+          # Execute macOS setup script
+          if ./scripts/mac.sh; then
+            echo "DEPLOYMENT_STATUS=SUCCESS" >> $GITHUB_ENV
+          else
+            echo "DEPLOYMENT_STATUS=FAILED" >> $GITHUB_ENV
+            echo "ERROR_MESSAGE=macOS setup script failed" >> $GITHUB_ENV
+          fi
+        env:
+          TAILSCALE_AUTH_KEY: ${{ secrets.TAILSCALE_AUTH_KEY }}
+
+      - name: 📊 Display Connection Information
+        shell: bash
+        run: |
+          if [[ "${{ runner.os }}" == "Windows" ]]; then
+            powershell -File ./scripts/common/display-info.ps1
+          else
+            ./scripts/common/display-info.sh
+          fi
+
+      - name: 🔄 Maintain Active Connection
+        shell: bash
+        run: |
+          if [[ "$DEPLOYMENT_STATUS" == "SUCCESS" ]]; then
+            if [[ "${{ runner.os }}" == "Windows" ]]; then
+              powershell -File ./scripts/common/keep-alive.ps1
+            else
+              ./scripts/common/keep-alive.sh
+            fi
+          else
+            echo "❌ Deployment failed, skipping connection maintenance"
+            echo "Error: $ERROR_MESSAGE"
+            exit 1
+          fi
+
+      - name: 🧹 Cleanup Resources
+        if: always()
+        shell: bash
+        run: |
+          echo "🧹 Cleaning up resources..."
+          
+          # Tailscale logout
+          if command -v tailscale &> /dev/null; then
+            sudo tailscale logout 2>/dev/null || true
+          elif [[ "${{ runner.os }}" == "Windows" ]] && [[ -f "$PROGRAMFILES/Tailscale/tailscale.exe" ]]; then
+            "$PROGRAMFILES/Tailscale/tailscale.exe" logout 2>/dev/null || true
+          fi
+          
+          echo "✅ Cleanup completed"
