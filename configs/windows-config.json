@@ -1,0 +1,20 @@
+{
+  "rdp_port": 3389,
+  "user_name": "RDP",
+  "password_length": 18,
+  "firewall_rule_name": "RDP-Tailscale",
+  "security": {
+    "nla_disabled": true,
+    "min_encryption": 2,
+    "enable_udp_transport": true
+  },
+  "features": {
+    "clipboard_sharing": true,
+    "drive_redirection": true,
+    "audio_redirection": true,
+    "printer_redirection": false
+  },
+  "services": {
+    "ensure_running": ["TermService", "UmRdpService", "SessionEnv"]
+  }
+}
