@@ -1,0 +1,16 @@
+{
+  "vnc_port": 5900,
+  "username": "rdpuser",
+  "user_id": 1001,
+  "password_length": 16,
+  "features": {
+    "screen_sharing": true,
+    "file_sharing": false,
+    "clipboard_sharing": true,
+    "system_sleep_disabled": true
+  },
+  "optimization": {
+    "caffeinate": true,
+    "pmset": { "sleep": 0, "displaysleep": 0, "disksleep": 0 }
+  }
+}
