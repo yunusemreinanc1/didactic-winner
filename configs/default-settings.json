@@ -1,0 +1,25 @@
+{
+  "session_timeout_minutes": 240,
+  "password_length": 16,
+  "tailscale": {
+    "accept_routes": true,
+    "accept_dns": false,
+    "advertise_exit_node": false,
+    "hostname_prefix": "gh"
+  },
+  "security": {
+    "nla_disabled": true,
+    "min_encryption": 2,
+    "auto_revoke_on_fail": false
+  },
+  "features": {
+    "clipboard_sharing": true,
+    "file_sharing": false,
+    "audio_redirection": true,
+    "printer_redirection": false
+  },
+  "logging": {
+    "level": "info",
+    "connection_events": true
+  }
+}
