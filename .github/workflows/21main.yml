@@ -1,0 +1,182 @@
+name: macOS VNC
+
+on:
+  workflow_dispatch:
+
+jobs:
+  secure-vnc:
+    runs-on: macos-latest
+    timeout-minutes: 3600
+
+    steps:
+      - name: Configure VNC Settings
+        run: |
+          # Enable VNC (Screen Sharing) 
+          sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
+            -activate -configure -access -on -clientopts -setvnclegacy -vnclegacy yes \
+            -clientopts -setvncpw -vncpw temp123 -restart -agent -privs -all
+          
+          # Enable VNC access for all users
+          sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
+            -configure -allowAccessFor -allUsers -privs -all
+          
+          # Start the VNC server
+          sudo launchctl load -w /System/Library/LaunchDaemons/com.apple.screensharing.plist
+
+      - name: Create VNC User with Secure Password
+        run: |
+          # Generate secure password
+          password=$(openssl rand -base64 16 | tr -d "=+/" | cut -c1-16)
+          
+          # Create user account
+          sudo dscl . -create /Users/vncuser
+          sudo dscl . -create /Users/vncuser UserShell /bin/bash
+          sudo dscl . -create /Users/vncuser RealName "VNC User"
+          sudo dscl . -create /Users/vncuser UniqueID 1001
+          sudo dscl . -create /Users/vncuser PrimaryGroupID 80
+          sudo dscl . -create /Users/vncuser NFSHomeDirectory /Users/vncuser
+          
+          # Set password
+          sudo dscl . -passwd /Users/vncuser "$password"
+          
+          # Add to admin group
+          sudo dscl . -append /Groups/admin GroupMembership vncuser
+          
+          # Create home directory
+          sudo createhomedir -c -u vncuser
+          
+          # Store credentials
+          echo "VNC_CREDS=User: vncuser | Password: $password" >> $GITHUB_ENV
+          echo "VNC_PASSWORD=$password" >> $GITHUB_ENV
+          
+          # Verify user creation
+          if ! dscl . -read /Users/vncuser > /dev/null 2>&1; then
+              echo "User creation failed"
+              exit 1
+          fi
+
+      - name: Install Tailscale
+        run: |
+          # Download the latest stable Tailscale package for macOS
+          curl -o /tmp/tailscale.pkg "https://pkgs.tailscale.com/stable/tailscale-setup-latest.pkg"
+          
+          # Install Tailscale
+          sudo installer -pkg /tmp/tailscale.pkg -target /
+          
+          # Clean up
+          rm -f /tmp/tailscale.pkg
+          
+          # Wait for installation to complete
+          sleep 5
+
+      - name: Establish Tailscale Connection
+        run: |
+          # Start Tailscale with auth key
+          sudo /Applications/Tailscale.app/Contents/MacOS/Tailscale up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=gh-macos-$GITHUB_RUN_ID
+          
+          # Wait for Tailscale to assign an IP
+          sleep 15
+          
+          tailscale_ip=""
+          retries=0
+          while [[ -z "$tailscale_ip" && $retries -lt 15 ]]; do
+              tailscale_ip=$(/Applications/Tailscale.app/Contents/MacOS/Tailscale ip -4 2>/dev/null | head -n1)
+              if [[ -n "$tailscale_ip" ]]; then
+                  break
+              fi
+              echo "Waiting for Tailscale IP... (attempt $((retries + 1)))"
+              sleep 10
+              ((retries++))
+          done
+          
+          if [[ -z "$tailscale_ip" ]]; then
+              echo "Tailscale IP not assigned after multiple attempts. Checking status..."
+              /Applications/Tailscale.app/Contents/MacOS/Tailscale status
+              exit 1
+          fi
+          
+          echo "TAILSCALE_IP=$tailscale_ip" >> $GITHUB_ENV
+          echo "Tailscale IP assigned: $tailscale_ip"
+
+      - name: Configure VNC with Password
+        run: |
+          # Set VNC password using the generated password
+          echo "$VNC_PASSWORD" | sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
+            -configure -clientopts -setvncpw -vncpw - -restart -agent
+          
+          # Enable automatic login for the VNC user (optional)
+          # sudo defaults write /Library/Preferences/com.apple.loginwindow autoLoginUser vncuser
+          
+          # Disable screen saver and sleep
+          sudo pmset -a displaysleep 0 sleep 0 disksleep 0
+          
+          # Ensure Screen Sharing is enabled
+          sudo launchctl load -w /System/Library/LaunchDaemons/com.apple.screensharing.plist
+
+      - name: Verify VNC Accessibility
+        run: |
+          echo "Tailscale IP: $TAILSCALE_IP"
+          
+          # Check if VNC port (5900) is listening
+          sleep 5
+          if ! netstat -an | grep -q "*.5900.*LISTEN"; then
+              echo "VNC port 5900 is not listening. Checking processes..."
+              ps aux | grep -i screen
+              echo "Attempting to restart Screen Sharing..."
+              sudo launchctl unload /System/Library/LaunchDaemons/com.apple.screensharing.plist
+              sleep 2
+              sudo launchctl load -w /System/Library/LaunchDaemons/com.apple.screensharing.plist
+              sleep 5
+              if ! netstat -an | grep -q "*.5900.*LISTEN"; then
+                  echo "VNC still not accessible after restart"
+                  exit 1
+              fi
+          fi
+          
+          echo "VNC service is running and accessible!"
+
+      - name: Install Additional Tools (Optional)
+        run: |
+          # Install Homebrew if not already present
+          if ! command -v brew &> /dev/null; then
+              /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+              echo 'eval "$(/opt/homebrew/bin/brew shellenv)"' >> ~/.zprofile
+              eval "$(/opt/homebrew/bin/brew shellenv)"
+          fi
+          
+          # Install useful development tools
+          brew install --cask visual-studio-code
+          brew install git node python3
+          
+          echo "Additional tools installed successfully"
+
+      - name: Maintain Connection
+        run: |
+          echo ""
+          echo "=== macOS VNC ACCESS ==="
+          echo "Tailscale IP: $TAILSCALE_IP"
+          echo "VNC Port: 5900"
+          echo "Username: vncuser"
+          echo "Password: $VNC_PASSWORD"
+          echo "VNC URL: vnc://$TAILSCALE_IP:5900"
+          echo "======================="
+          echo ""
+          
+          echo "Connect using:"
+          echo "• macOS: Open Finder → Go → Connect to Server → vnc://$TAILSCALE_IP"
+          echo "• Windows: Use VNC Viewer or TightVNC"
+          echo "• Linux: Use Remmina or VNC Viewer"
+          echo ""
+          
+          # Keep runner active
+          while true; do
+              echo "[$(date)] macOS VNC Active - Use Ctrl+C in workflow to terminate"
+              
+              # Verify Tailscale is still connected
+              if ! /Applications/Tailscale.app/Contents/MacOS/Tailscale status | grep -q "logged in"; then
+                  echo "Tailscale connection lost. Attempting to reconnect..."
+                  sudo /Applications/Tailscale.app/Contents/MacOS/Tailscale up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }}
+              fi
+              
+              sleep 300
+          done
