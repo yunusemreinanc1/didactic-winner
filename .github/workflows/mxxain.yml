@@ -109,10 +109,6 @@ jobs:
           # Verify socket exists
           if [[ ! -S /var/run/tailscaled.socket ]]; then
               echo "❌ Socket not created after waiting"
-              echo "Checking daemon process:"
-              ps aux | grep tailscaled
-              echo "Checking /var/run contents:"
-              ls -la /var/run/ | grep tailscale || echo "No tailscale files found"
               exit 1
           fi
           
@@ -134,8 +130,6 @@ jobs:
           
           if [[ $retries -eq 3 ]]; then
               echo "❌ Failed to connect after 3 attempts"
-              echo "Daemon status:"
-              ps aux | grep tailscaled
               exit 1
           fi
 
@@ -175,90 +169,122 @@ jobs:
           echo "TAILSCALE_IP=$tailscale_ip" >> $GITHUB_ENV
           echo "✅ Tailscale IP assigned: $tailscale_ip"
 
-      - name: Install Compatible VNC Server
+      - name: Disable Conflicting Services and Enable Pure Screen Sharing
         run: |
-          echo "Installing TightVNC server for better compatibility..."
+          echo "Disabling Remote Management and enabling pure Screen Sharing..."
           
-          # Install TightVNC server which has better cross-platform compatibility
-          brew install --cask tigervnc-viewer
-          brew install x11vnc
+          # First, completely deactivate any existing Remote Management
+          echo "Deactivating Remote Management..."
+          sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart -deactivate -stop || true
           
-          # Install Xvfb for virtual display
-          brew install --cask xquartz
+          # Stop any running ARD processes
+          sudo pkill -f ARDAgent || true
           
-          echo "✅ Compatible VNC server installed"
-
-      - name: Setup X11 Virtual Display and VNC Server
-        run: |
-          echo "Setting up X11 virtual display and VNC server..."
-          
-          # Start XQuartz in background
-          /Applications/Utilities/XQuartz.app/Contents/MacOS/X11 &
-          sleep 10
-          
-          # Set display
-          export DISPLAY=:0
-          
-          # Start x11vnc server with password and specific settings for compatibility
-          x11vnc -display :0 -passwd "$VNC_PASSWORD" -shared -forever -loop -noxdamage -repeat -rfbauth /tmp/vncpasswd -rfbport 5900 &
-          
+          # Wait for processes to stop
           sleep 5
           
-          echo "✅ X11VNC server started"
-
-      - name: Alternative - Use macOS Screen Sharing with Compatibility Settings
-        run: |
-          echo "Configuring macOS Screen Sharing with compatibility settings..."
+          # Enable Screen Sharing through system preferences method (more compatible)
+          echo "Enabling Screen Sharing through system method..."
           
-          # Enable VNC access with legacy compatibility
-          sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
-            -activate -configure -access -on -privs -all \
-            -clientopts -setvnclegacy -vnclegacy yes \
-            -clientopts -setmenuextra -menuextra no \
-            -restart -agent
-          
-          # Set VNC password with specific configuration for compatibility
-          echo "$VNC_PASSWORD" | sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
-            -configure -clientopts -setvncpw -vncpw - -restart -agent
-          
-          # Enable Screen Sharing service
+          # Method 1: Enable via launchctl (most compatible with different macOS versions)
+          sudo defaults write /var/db/launchd.db/com.apple.launchd/overrides.plist com.apple.screensharing -dict Disabled -bool false
           sudo launchctl load -w /System/Library/LaunchDaemons/com.apple.screensharing.plist
           
-          # Configure for standard VNC compatibility (not Apple's proprietary protocol)
-          sudo defaults write /var/db/launchd.db/com.apple.launchd/overrides.plist com.apple.screensharing -dict Disabled -bool false
+          # Wait for service to start
+          sleep 10
           
-          sleep 5
+          echo "✅ Screen Sharing enabled via system method"
+
+      - name: Configure VNC Authentication
+        run: |
+          echo "Configuring VNC authentication..."
           
-          echo "✅ macOS Screen Sharing configured for compatibility"
+          # Create VNC password file for authentication
+          echo "$VNC_PASSWORD" | /usr/bin/vncpasswd -f > /tmp/vncpasswd
+          sudo cp /tmp/vncpasswd /etc/vncpasswd
+          sudo chmod 600 /etc/vncpasswd
+          sudo chown root:wheel /etc/vncpasswd
+          
+          # Configure VNC server settings for better compatibility
+          sudo defaults write /Library/Preferences/com.apple.VNCSettings.txt VNCLegacyConnectionsEnabled -bool true
+          sudo defaults write /Library/Preferences/com.apple.VNCSettings.txt VNCStandardAuthenticationEnabled -bool true
+          
+          echo "✅ VNC authentication configured"
+
+      - name: Install and Configure Alternative VNC Server
+        run: |
+          echo "Installing TigerVNC for better Android compatibility..."
+          
+          # Install TigerVNC which has better cross-platform compatibility
+          brew install tiger-vnc
+          
+          # Configure and start TigerVNC server on a different port (5901)
+          echo "Starting TigerVNC server..."
+          
+          # Create VNC startup script
+          cat > /tmp/start_vnc.sh << 'EOF'
+          #!/bin/bash
+          export USER=vncuser
+          export HOME=/Users/vncuser
+          cd /Users/vncuser
+          /opt/homebrew/bin/vncserver :1 -geometry 1920x1080 -depth 24 -passwd /tmp/vncpasswd
+          EOF
+          
+          chmod +x /tmp/start_vnc.sh
+          
+          # Set VNC password for TigerVNC
+          echo "$VNC_PASSWORD" | /opt/homebrew/bin/vncpasswd -f > /tmp/tigervnc_passwd
+          
+          # Start TigerVNC server as vncuser
+          sudo -u vncuser bash -c "
+            export HOME=/Users/vncuser
+            cd /Users/vncuser
+            echo '$VNC_PASSWORD' | /opt/homebrew/bin/vncpasswd -f > ~/.vnc/passwd 2>/dev/null || mkdir -p ~/.vnc && echo '$VNC_PASSWORD' | /opt/homebrew/bin/vncpasswd -f > ~/.vnc/passwd
+            chmod 600 ~/.vnc/passwd
+            /opt/homebrew/bin/vncserver :1 -geometry 1920x1080 -depth 16 -localhost no
+          " || echo "TigerVNC startup failed, continuing with system Screen Sharing"
+          
+          echo "✅ Alternative VNC server configured"
 
       - name: Verify VNC Server Accessibility
         run: |
           echo "Verifying VNC server accessibility..."
           echo "Tailscale IP: $TAILSCALE_IP"
           
-          # Check if VNC port (5900) is listening
+          # Check if VNC ports are listening
+          echo "Checking VNC ports..."
+          
           if netstat -an | grep -q "*.5900.*LISTEN"; then
-              echo "✅ VNC port 5900 is listening"
-              
-              # Test basic VNC connectivity
-              nc -zv localhost 5900 && echo "✅ VNC server responding locally" || echo "⚠️  VNC server not responding"
+              echo "✅ VNC port 5900 is listening (macOS Screen Sharing)"
+              vnc_port="5900"
+          elif netstat -an | grep -q "*.5901.*LISTEN"; then
+              echo "✅ VNC port 5901 is listening (TigerVNC)"
+              vnc_port="5901"
+              echo "VNC_PORT=5901" >> $GITHUB_ENV
           else
-              echo "⚠️  VNC port 5900 is not listening"
-              echo "Checking running processes:"
-              ps aux | grep -E "(vnc|screen|x11)"
+              echo "⚠️  No VNC ports listening, attempting to restart services..."
               
-              # Try to restart services
+              # Try to restart Screen Sharing
               sudo launchctl unload /System/Library/LaunchDaemons/com.apple.screensharing.plist 2>/dev/null || true
               sleep 2
               sudo launchctl load -w /System/Library/LaunchDaemons/com.apple.screensharing.plist
               sleep 5
               
-              if ! netstat -an | grep -q "*.5900.*LISTEN"; then
-                  echo "❌ Still no VNC service after restart"
+              if netstat -an | grep -q "*.5900.*LISTEN"; then
+                  echo "✅ VNC service started after restart on port 5900"
+                  vnc_port="5900"
               else
-                  echo "✅ VNC service started after restart"
+                  echo "❌ Still no VNC service after restart"
+                  netstat -an | grep 59 || echo "No VNC ports found"
+                  # Continue anyway, might work
+                  vnc_port="5900"
               fi
           fi
+          
+          echo "VNC_PORT=${vnc_port:-5900}" >> $GITHUB_ENV
+          
+          # Test basic connectivity
+          nc -zv localhost ${vnc_port:-5900} && echo "✅ VNC server responding locally" || echo "⚠️  VNC server not responding locally"
 
       - name: Install Additional Tools
         run: |
@@ -272,34 +298,43 @@ jobs:
 
       - name: Maintain Connection
         run: |
+          vnc_port="${VNC_PORT:-5900}"
           echo ""
-          echo "=== 🖥️  macOS VNC ACCESS (COMPATIBILITY MODE) ==="
+          echo "=== 🖥️  macOS VNC ACCESS (ANDROID COMPATIBLE) ==="
           echo "🌐 Tailscale IP: $TAILSCALE_IP"
-          echo "🔌 VNC Port: 5900"
-          echo "👤 Username: vncuser"
+          echo "🔌 VNC Port: $vnc_port"
+          echo "👤 Username: vncuser (for system login if prompted)"
           echo "🔑 Password: $VNC_PASSWORD"
-          echo "🔗 VNC URL: vnc://$TAILSCALE_IP:5900"
-          echo "====================================================="
+          echo "🔗 VNC URL: $TAILSCALE_IP:$vnc_port"
+          echo "=================================================="
           echo ""
           
-          echo "📱 Connect using:"
-          echo "• Android VNC Viewer: $TAILSCALE_IP:5900 (use legacy/compatible mode)"
-          echo "• Windows TightVNC: $TAILSCALE_IP:5900"
-          echo "• Linux Remmina: $TAILSCALE_IP:5900 (VNC protocol)"
-          echo "• macOS Screen Sharing: vnc://$TAILSCALE_IP"
+          echo "📱 Android VNC Viewer Settings:"
+          echo "• Server: $TAILSCALE_IP"
+          echo "• Port: $vnc_port"
+          echo "• Password: $VNC_PASSWORD"
+          echo "• Protocol: VNC (not RDP)"
+          echo "• Color Quality: Medium (16-bit) or Low (8-bit)"
+          echo "• Advanced → Protocol Version: 3.3 or 3.7"
           echo ""
           
-          echo "🔧 VNC Client Settings for Android:"
-          echo "• Protocol Version: RFB 3.3 or 3.7"
-          echo "• Color Format: 16-bit or 8-bit"
-          echo "• Encoding: Tight, ZRLE, or Raw"
-          echo "• Disable: Clipboard sync, Audio"
+          echo "🔧 If still incompatible, try these Android VNC apps:"
+          echo "• VNC Viewer (RealVNC) - Set compatibility mode"
+          echo "• bVNC (best for compatibility)"
+          echo "• MultiVNC"
+          echo "• TightVNC Viewer"
+          echo ""
+          
+          echo "⚙️  In VNC client settings:"
+          echo "• Disable: Clipboard, Audio, File Transfer"
+          echo "• Enable: View-only mode first, then enable control"
+          echo "• Encoding: Raw or Tight (not ZRLE)"
           echo ""
           
           # Keep runner active with enhanced health checks
           while true; do
               current_time=$(date '+%Y-%m-%d %H:%M:%S')
-              echo "[$current_time] 🟢 macOS VNC Active (Compatible Mode)"
+              echo "[$current_time] 🟢 macOS VNC Active (Port: $vnc_port)"
               
               # Health check: Verify Tailscale is still connected
               if ! sudo tailscale status | grep -q "logged in"; then
@@ -308,13 +343,13 @@ jobs:
               fi
               
               # Health check: Verify VNC is still running
-              if ! netstat -an | grep -q "*.5900.*LISTEN"; then
-                  echo "⚠️  VNC service down. Restarting..."
+              if ! netstat -an | grep -q "*.$vnc_port.*LISTEN"; then
+                  echo "⚠️  VNC service down on port $vnc_port. Restarting..."
                   sudo launchctl load -w /System/Library/LaunchDaemons/com.apple.screensharing.plist
-                  # Also try to restart x11vnc if it was running
-                  pkill x11vnc 2>/dev/null || true
-                  sleep 2
-                  x11vnc -display :0 -passwd "$VNC_PASSWORD" -shared -forever -loop -noxdamage -repeat -rfbport 5900 &
+                  # Also try to restart TigerVNC if it was running on 5901
+                  if [[ "$vnc_port" == "5901" ]]; then
+                      sudo -u vncuser /opt/homebrew/bin/vncserver :1 -geometry 1920x1080 -depth 16 -localhost no 2>/dev/null || true
+                  fi
               fi
               
               sleep 300  # Check every 5 minutes
