@@ -1,4 +1,4 @@
-name: macOS VNC Xxxxxx
+name: macOS VNC
 
 on:
   workflow_dispatch:
@@ -13,6 +13,11 @@ jobs:
         run: |
           # Disable screen saver and sleep first
           sudo pmset -a displaysleep 0 sleep 0 disksleep 0
+          
+          # Disable lock screen and screen saver
+          sudo defaults write /Library/Preferences/com.apple.screensaver askForPassword -int 0
+          sudo defaults write /Library/Preferences/com.apple.screensaver askForPasswordDelay -int 0
+          
           echo "✅ System settings configured"
 
       - name: Create VNC User with Secure Password
@@ -169,98 +174,261 @@ jobs:
           echo "TAILSCALE_IP=$tailscale_ip" >> $GITHUB_ENV
           echo "✅ Tailscale IP assigned: $tailscale_ip"
 
-      - name: Enable Screen Sharing (Simple Method)
+      - name: Configure Auto-Login and Active Display
         run: |
-          echo "Enabling macOS Screen Sharing - Simple Method..."
+          echo "Configuring automatic login and keeping display active..."
           
-          # Enable Screen Sharing service using the simplest method
+          # Enable automatic login for vncuser
+          sudo defaults write /Library/Preferences/com.apple.loginwindow autoLoginUser vncuser
+          
+          # Disable the lock screen
+          sudo -u vncuser defaults write com.apple.screensaver askForPassword -int 0
+          
+          # Set desktop background to solid color (helps with VNC performance)
+          sudo -u vncuser defaults write com.apple.desktop Background '{default = {ImageFilePath = "/Library/Desktop Pictures/Solid Colors/Blue.png"; };}'
+          
+          # Create a script to keep the screen active and logged in
+          cat > /tmp/keep_active.sh << 'EOF'
+          #!/bin/bash
+          
+          echo "Starting screen keep-alive service..."
+          
+          while true; do
+              # Check if we're at login screen and auto-login if needed
+              current_user=$(who | grep console | awk '{print $1}' | head -1)
+              if [[ -z "$current_user" ]]; then
+                  echo "No user logged in, triggering auto-login..."
+                  # Simulate clicking on the login screen
+                  sudo -u vncuser osascript -e 'tell application "System Events" to click at {512, 384}' 2>/dev/null || true
+                  sleep 5
+              fi
+              
+              # Keep screen active by simulating tiny mouse movements
+              sudo -u vncuser osascript -e '
+                  tell application "System Events"
+                      set currentPos to position of mouse
+                      set position of mouse to {(item 1 of currentPos) + 1, (item 2 of currentPos) + 1}
+                      delay 0.1
+                      set position of mouse to currentPos
+                  end tell
+              ' 2>/dev/null || true
+              
+              # Check every 30 seconds
+              sleep 30
+          done
+          EOF
+          
+          chmod +x /tmp/keep_active.sh
+          
+          # Start the keep-active script in background
+          /tmp/keep_active.sh &
+          KEEP_ACTIVE_PID=$!
+          echo "Keep-active script started with PID: $KEEP_ACTIVE_PID"
+          
+          echo "✅ Auto-login and screen keep-alive configured"
+
+      - name: Enable Screen Sharing with Full Access
+        run: |
+          echo "Enabling macOS Screen Sharing with full access..."
+          
+          # First, ensure Remote Management is completely disabled to avoid conflicts
+          sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart -deactivate -stop 2>/dev/null || true
+          sudo pkill -f ARDAgent 2>/dev/null || true
+          
+          sleep 3
+          
+          # Enable Screen Sharing service
           echo "Starting Screen Sharing service..."
           sudo launchctl load -w /System/Library/LaunchDaemons/com.apple.screensharing.plist
           
           # Wait for service to start
           sleep 10
           
-          # Verify service is running
-          if netstat -an | grep -q "*.5900.*LISTEN"; then
-              echo "✅ Screen Sharing service started successfully on port 5900"
-          else
-              echo "⚠️  Screen Sharing not started, trying alternative method..."
+          # Alternative method if the first doesn't work
+          if ! netstat -an | grep -q "*.5900.*LISTEN"; then
+              echo "Trying alternative Screen Sharing activation..."
               
-              # Alternative: Use kickstart method
+              # Enable via kickstart but with minimal configuration
               sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
-                -activate -configure -access -on -users vncuser -privs -all -restart -agent
+                -activate -configure -allowAccessFor -allUsers -privs -all -restart -agent -console
               
               sleep 10
-              
-              if netstat -an | grep -q "*.5900.*LISTEN"; then
-                  echo "✅ Screen Sharing started via kickstart method"
-              else
-                  echo "❌ Screen Sharing failed to start"
-                  netstat -an | grep 59 || echo "No VNC ports found"
-              fi
           fi
+          
+          # Verify service is running
+          if netstat -an | grep -q "*.5900.*LISTEN"; then
+              echo "✅ Screen Sharing service is running on port 5900"
+          else
+              echo "⚠️  Screen Sharing may not be fully active"
+              echo "Available listening ports:"
+              netstat -an | grep LISTEN | head -10
+          fi
+
+      - name: Create Desktop Environment Setup
+        run: |
+          echo "Setting up a proper desktop environment for VNC..."
+          
+          # Create a startup script for the VNC user
+          sudo -u vncuser mkdir -p /Users/vncuser/Library/LaunchAgents
+          
+          # Create a launch agent to ensure desktop is ready
+          cat > /tmp/desktop-setup.plist << 'EOF'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+              <key>Label</key>
+              <string>com.vnc.desktop-setup</string>
+              <key>ProgramArguments</key>
+              <array>
+                  <string>/bin/bash</string>
+                  <string>-c</string>
+                  <string>sleep 10 && open -a Finder && open -a "System Preferences"</string>
+              </array>
+              <key>RunAtLoad</key>
+              <true/>
+          </dict>
+          </plist>
+          EOF
+          
+          sudo -u vncuser cp /tmp/desktop-setup.plist /Users/vncuser/Library/LaunchAgents/
+          sudo -u vncuser launchctl load /Users/vncuser/Library/LaunchAgents/desktop-setup.plist 2>/dev/null || true
+          
+          echo "✅ Desktop environment setup completed"
 
       - name: Create Simple HTML VNC Client
         run: |
-          echo "Creating a simple HTML VNC client for web access..."
+          echo "Creating web-based connection guide..."
           
-          # Create a simple HTML file that can connect to VNC
           mkdir -p /tmp/vnc-web
-          cat > /tmp/vnc-web/vnc.html << 'EOF'
+          cat > /tmp/vnc-web/index.html << 'EOF'
           <!DOCTYPE html>
           <html>
           <head>
-              <title>VNC Connection</title>
+              <title>macOS VNC Connection Guide</title>
+              <meta charset="UTF-8">
+              <meta name="viewport" content="width=device-width, initial-scale=1.0">
               <style>
-                  body { font-family: Arial, sans-serif; margin: 40px; background: #f0f0f0; }
-                  .container { background: white; padding: 30px; border-radius: 10px; max-width: 600px; margin: 0 auto; }
-                  .info { background: #e8f4fd; padding: 15px; border-radius: 5px; margin: 20px 0; }
-                  .credentials { background: #f8f9fa; padding: 15px; border-radius: 5px; font-family: monospace; }
-                  .button { background: #007bff; color: white; padding: 10px 20px; border: none; border-radius: 5px; text-decoration: none; display: inline-block; }
-                  .warning { background: #fff3cd; padding: 15px; border-radius: 5px; border-left: 4px solid #ffc107; }
+                  body { 
+                      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; 
+                      margin: 0; padding: 20px; background: #f5f5f7; color: #1d1d1f;
+                  }
+                  .container { 
+                      max-width: 800px; margin: 0 auto; background: white; 
+                      border-radius: 12px; padding: 30px; box-shadow: 0 4px 20px rgba(0,0,0,0.1);
+                  }
+                  h1 { color: #007AFF; text-align: center; margin-bottom: 30px; }
+                  .connection-box { 
+                      background: #f8f9fa; padding: 20px; border-radius: 8px; 
+                      margin: 20px 0; border-left: 4px solid #007AFF;
+                  }
+                  .credentials { 
+                      background: #e8f4fd; padding: 15px; border-radius: 6px; 
+                      font-family: 'Monaco', 'Courier New', monospace; font-size: 14px;
+                  }
+                  .status { 
+                      background: #d4edda; padding: 15px; border-radius: 6px; 
+                      border-left: 4px solid #28a745; margin: 20px 0;
+                  }
+                  .app-list { 
+                      display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); 
+                      gap: 15px; margin: 20px 0;
+                  }
+                  .app-card { 
+                      background: #f8f9fa; padding: 15px; border-radius: 8px; 
+                      text-align: center; border: 1px solid #dee2e6;
+                  }
+                  .recommended { border-color: #007AFF; background: #e8f4fd; }
+                  .steps { 
+                      counter-reset: step-counter; list-style: none; padding: 0;
+                  }
+                  .steps li { 
+                      counter-increment: step-counter; margin: 15px 0; 
+                      padding: 15px; background: #f8f9fa; border-radius: 6px;
+                      position: relative; padding-left: 50px;
+                  }
+                  .steps li::before { 
+                      content: counter(step-counter); position: absolute; left: 15px; 
+                      top: 15px; background: #007AFF; color: white; 
+                      border-radius: 50%; width: 25px; height: 25px; 
+                      display: flex; align-items: center; justify-content: center; 
+                      font-weight: bold; font-size: 12px;
+                  }
+                  .troubleshooting { 
+                      background: #fff3cd; padding: 15px; border-radius: 6px; 
+                      border-left: 4px solid #ffc107; margin: 20px 0;
+                  }
               </style>
           </head>
           <body>
               <div class="container">
-                  <h1>🖥️ macOS VNC Connection</h1>
+                  <h1>🖥️ macOS VNC Connection Guide</h1>
                   
-                  <div class="info">
-                      <h3>📱 For Android VNC Apps:</h3>
+                  <div class="status">
+                      <h3>✅ VNC Server Status: ACTIVE</h3>
+                      <p>Your macOS desktop is ready for remote connections!</p>
+                  </div>
+                  
+                  <div class="connection-box">
+                      <h3>📱 Connection Details</h3>
                       <div class="credentials">
                           <strong>Server:</strong> TAILSCALE_IP_PLACEHOLDER<br>
                           <strong>Port:</strong> 5900<br>
                           <strong>Username:</strong> vncuser<br>
-                          <strong>Password:</strong> PASSWORD_PLACEHOLDER
+                          <strong>Password:</strong> PASSWORD_PLACEHOLDER<br>
+                          <strong>Authentication:</strong> Username & Password (NOT VNC Password)
                       </div>
                   </div>
                   
-                  <div class="warning">
-                      <h4>⚙️ Android VNC Client Settings:</h4>
-                      <ul>
-                          <li><strong>Authentication:</strong> Username & Password (NOT VNC Password)</li>
-                          <li><strong>Color Quality:</strong> Medium (16-bit)</li>
-                          <li><strong>Recommended Apps:</strong> RealVNC Viewer, bVNC, MultiVNC</li>
-                      </ul>
+                  <div class="connection-box">
+                      <h3>📱 Recommended Android VNC Apps</h3>
+                      <div class="app-list">
+                          <div class="app-card recommended">
+                              <h4>🥇 bVNC</h4>
+                              <p>Best macOS compatibility</p>
+                          </div>
+                          <div class="app-card">
+                              <h4>🥈 MultiVNC</h4>
+                              <p>Good performance</p>
+                          </div>
+                          <div class="app-card">
+                              <h4>🥉 RealVNC Viewer</h4>
+                              <p>Official app</p>
+                          </div>
+                          <div class="app-card">
+                              <h4>VNC Viewer</h4>
+                              <p>Free option</p>
+                          </div>
+                      </div>
                   </div>
                   
-                  <div class="info">
-                      <h3>🔧 Troubleshooting:</h3>
-                      <ul>
-                          <li>If "incompatible protocol": Try <strong>bVNC</strong> app (best compatibility)</li>
-                          <li>If authentication fails: Select "Username/Password" not "VNC Password"</li>
-                          <li>If slow: Reduce color quality to 8-bit</li>
-                          <li>If connection refused: Check if you're on the same Tailscale network</li>
-                      </ul>
-                  </div>
-                  
-                  <div class="info">
-                      <h3>📱 Recommended Android Apps:</h3>
-                      <ol>
-                          <li><strong>bVNC</strong> - Best macOS compatibility</li>
-                          <li><strong>MultiVNC</strong> - Good performance</li>
-                          <li><strong>RealVNC Viewer</strong> - Official app</li>
-                          <li><strong>VNC Viewer (free)</strong> - Basic but works</li>
+                  <div class="connection-box">
+                      <h3>🔧 Setup Steps</h3>
+                      <ol class="steps">
+                          <li>Download and install one of the recommended VNC apps from Google Play Store</li>
+                          <li>Open the app and create a new connection</li>
+                          <li>Enter the server details from the connection box above</li>
+                          <li>Set Authentication Type to "Username & Password" (NOT "VNC Password")</li>
+                          <li>Set Color Quality to "Medium" or "High" for best performance</li>
+                          <li>Connect and enjoy your macOS desktop!</li>
                       </ol>
+                  </div>
+                  
+                  <div class="troubleshooting">
+                      <h3>🔧 Troubleshooting</h3>
+                      <ul>
+                          <li><strong>Black screen after connecting:</strong> Click/tap anywhere on the screen or press any key</li>
+                          <li><strong>Login screen appears:</strong> Enter username "vncuser" and the password above</li>
+                          <li><strong>"Incompatible protocol" error:</strong> Try the bVNC app instead</li>
+                          <li><strong>Authentication fails:</strong> Make sure you selected "Username & Password" not "VNC Password"</li>
+                          <li><strong>Connection slow:</strong> Reduce color quality to "Medium" or "Low"</li>
+                          <li><strong>Connection refused:</strong> Ensure both devices are on the same Tailscale network</li>
+                      </ul>
+                  </div>
+                  
+                  <div class="status">
+                      <h3>🌐 Alternative: Web Access</h3>
+                      <p>If VNC apps don't work, some web-based solutions might be available. Check the GitHub Actions log for additional options.</p>
                   </div>
               </div>
           </body>
@@ -268,45 +436,46 @@ jobs:
           EOF
           
           # Replace placeholders with actual values
-          sed -i '' "s/TAILSCALE_IP_PLACEHOLDER/$TAILSCALE_IP/g" /tmp/vnc-web/vnc.html
-          sed -i '' "s/PASSWORD_PLACEHOLDER/$VNC_PASSWORD/g" /tmp/vnc-web/vnc.html
+          sed -i '' "s/TAILSCALE_IP_PLACEHOLDER/$TAILSCALE_IP/g" /tmp/vnc-web/index.html
+          sed -i '' "s/PASSWORD_PLACEHOLDER/$VNC_PASSWORD/g" /tmp/vnc-web/index.html
           
-          # Start a simple HTTP server for the web interface
-          echo "Starting simple HTTP server for web interface..."
+          # Start HTTP server
           cd /tmp/vnc-web
           python3 -m http.server 8080 --bind 0.0.0.0 &
-          HTTP_SERVER_PID=$!
+          HTTP_PID=$!
           
-          echo "✅ Simple HTTP server started on port 8080 (PID: $HTTP_SERVER_PID)"
-          echo "✅ Web interface available at: http://$TAILSCALE_IP:8080/vnc.html"
+          echo "✅ Web guide available at: http://$TAILSCALE_IP:8080"
 
-      - name: Verify VNC Server Accessibility
+      - name: Verify All Services
         run: |
-          echo "Verifying VNC server accessibility..."
-          echo "Tailscale IP: $TAILSCALE_IP"
+          echo "Performing final verification of all services..."
           
-          # Check if VNC port (5900) is listening
+          echo "🔍 Checking VNC service..."
           if netstat -an | grep -q "*.5900.*LISTEN"; then
-              echo "✅ VNC port 5900 is listening"
-              
-              # Test basic VNC connectivity
-              if nc -zv localhost 5900 2>/dev/null; then
-                  echo "✅ VNC server responding locally"
-              else
-                  echo "⚠️  VNC server not responding locally"
-              fi
+              echo "✅ VNC port 5900: ACTIVE"
+              nc -zv localhost 5900 2>/dev/null && echo "✅ VNC responding locally" || echo "⚠️  VNC not responding"
           else
-              echo "❌ VNC port 5900 is not listening"
-              echo "Available ports:"
-              netstat -an | grep LISTEN | head -10
+              echo "❌ VNC port 5900: NOT ACTIVE"
           fi
           
-          # Check if HTTP server is running
+          echo "🔍 Checking HTTP server..."
           if netstat -an | grep -q "*.8080.*LISTEN"; then
-              echo "✅ HTTP server is running on port 8080"
+              echo "✅ HTTP port 8080: ACTIVE"
+              curl -s http://localhost:8080 > /dev/null && echo "✅ HTTP responding" || echo "⚠️  HTTP not responding"
           else
-              echo "⚠️  HTTP server not running"
+              echo "❌ HTTP port 8080: NOT ACTIVE"
           fi
+          
+          echo "🔍 Checking user login status..."
+          current_user=$(who | grep console | awk '{print $1}' | head -1)
+          if [[ -n "$current_user" ]]; then
+              echo "✅ User logged in: $current_user"
+          else
+              echo "⚠️  No user currently logged in (auto-login may take a moment)"
+          fi
+          
+          echo "🔍 Active processes..."
+          ps aux | grep -E "(VNC|vnc|screen)" | grep -v grep || echo "No VNC processes visible"
 
       - name: Install Additional Tools
         run: |
@@ -321,84 +490,64 @@ jobs:
       - name: Maintain Connection
         run: |
           echo ""
-          echo "═══════════════════════════════════════════════════════════════"
-          echo "🖥️  macOS VNC ACCESS - ANDROID COMPATIBLE"
-          echo "═══════════════════════════════════════════════════════════════"
+          echo "════════════════════════════════════════════════════════════════════════════"
+          echo "🖥️  macOS VNC SERVER - FULLY CONFIGURED AND ACTIVE"
+          echo "════════════════════════════════════════════════════════════════════════════"
           echo "🌐 Tailscale IP: $TAILSCALE_IP"
           echo "🔌 VNC Port: 5900"
           echo "👤 Username: $VNC_USERNAME"
           echo "🔑 Password: $VNC_PASSWORD"
-          echo "🌍 Web Info: http://$TAILSCALE_IP:8080/vnc.html"
-          echo "═══════════════════════════════════════════════════════════════"
+          echo "🌍 Setup Guide: http://$TAILSCALE_IP:8080"
+          echo "════════════════════════════════════════════════════════════════════════════"
           echo ""
           
-          echo "📱 ANDROID CONNECTION GUIDE:"
+          echo "🎯 READY TO CONNECT!"
           echo ""
-          echo "Step 1: Download a VNC app (recommended order):"
-          echo "   🥇 bVNC - Best compatibility with macOS"
-          echo "   🥈 MultiVNC - Good performance"
-          echo "   🥉 RealVNC Viewer - Official app"
-          echo "   4️⃣ VNC Viewer - Basic free app"
+          echo "📱 FOR ANDROID USERS:"
+          echo "   1. Download 'bVNC' or 'RealVNC Viewer' from Google Play Store"
+          echo "   2. Create new connection with details above"
+          echo "   3. Set authentication to 'Username & Password' (NOT VNC Password)"
+          echo "   4. Connect and enjoy your macOS desktop!"
           echo ""
-          
-          echo "Step 2: Configure VNC app with these settings:"
-          echo "   • Server/Host: $TAILSCALE_IP"
-          echo "   • Port: 5900"
-          echo "   • Authentication Type: Username & Password (NOT VNC Password!)"
-          echo "   • Username: $VNC_USERNAME"
-          echo "   • Password: $VNC_PASSWORD"
-          echo "   • Color Quality: Medium (16-bit) - better performance"
-          echo "   • Protocol Version: Auto or 3.8"
+          echo "🌐 FOR WEB ACCESS:"
+          echo "   Visit: http://$TAILSCALE_IP:8080 for detailed setup guide"
+          echo ""
+          echo "🔧 IF YOU SEE A BLACK SCREEN:"
+          echo "   • Click anywhere on the screen"
+          echo "   • Press any key to wake up"
+          echo "   • Login with username: $VNC_USERNAME, password: $VNC_PASSWORD"
           echo ""
           
-          echo "Step 3: Advanced Settings (if available):"
-          echo "   • Disable: Clipboard sync, File transfer"
-          echo "   • Enable: View-only mode first, then enable control"
-          echo "   • Encoding: Auto, Tight, or Raw"
-          echo ""
-          
-          echo "🌐 ALTERNATIVE - Web Browser Method:"
-          echo "   • Open any browser on your Android device"
-          echo "   • Go to: http://$TAILSCALE_IP:8080/vnc.html"
-          echo "   • Get connection details from the webpage"
-          echo ""
-          
-          echo "🔧 TROUBLESHOOTING:"
-          echo "   • 'Incompatible protocol' → Try bVNC app"
-          echo "   • 'Authentication failed' → Select 'Username/Password' NOT 'VNC Password'"
-          echo "   • 'Connection refused' → Check Tailscale connection"
-          echo "   • 'Black/blank screen' → Try 8-bit color depth"
-          echo "   • 'Very slow' → Disable clipboard and reduce color quality"
-          echo ""
-          
-          echo "✅ READY! Your macOS desktop is accessible via VNC!"
-          echo "   Visit http://$TAILSCALE_IP:8080/vnc.html for detailed instructions"
-          echo ""
-          
-          # Keep runner active with health checks
+          # Enhanced health monitoring loop
           while true; do
               current_time=$(date '+%Y-%m-%d %H:%M:%S')
               echo "[$current_time] 🟢 macOS VNC Server Active"
               
-              # Health check: Verify Tailscale is still connected
+              # Check Tailscale connection
               if ! sudo tailscale status | grep -q "logged in"; then
-                  echo "⚠️  Tailscale connection lost. Attempting to reconnect..."
-                  sudo tailscale up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} || echo "Reconnection failed"
+                  echo "⚠️  Tailscale reconnecting..."
+                  sudo tailscale up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=gh-macos-$GITHUB_RUN_ID
               fi
               
-              # Health check: Verify VNC service is still running
+              # Check VNC service
               if ! netstat -an | grep -q "*.5900.*LISTEN"; then
-                  echo "⚠️  VNC service down. Restarting..."
+                  echo "⚠️  Restarting VNC service..."
                   sudo launchctl load -w /System/Library/LaunchDaemons/com.apple.screensharing.plist
               fi
               
-              # Health check: Verify HTTP server is still running
+              # Check HTTP server
               if ! netstat -an | grep -q "*.8080.*LISTEN"; then
-                  echo "⚠️  HTTP server down. Restarting..."
+                  echo "⚠️  Restarting HTTP server..."
                   cd /tmp/vnc-web
                   python3 -m http.server 8080 --bind 0.0.0.0 &
               fi
               
+              # Ensure user stays logged in
+              current_user=$(who | grep console | awk '{print $1}' | head -1)
+              if [[ -z "$current_user" ]]; then
+                  echo "🔄 Triggering auto-login..."
+                  sudo -u vncuser osascript -e 'tell application "System Events" to click at {512, 384}' 2>/dev/null || true
+              fi
+              
               sleep 300  # Check every 5 minutes
           done
-          
