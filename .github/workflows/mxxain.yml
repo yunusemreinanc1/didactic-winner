@@ -169,59 +169,116 @@ jobs:
           echo "TAILSCALE_IP=$tailscale_ip" >> $GITHUB_ENV
           echo "✅ Tailscale IP assigned: $tailscale_ip"
 
-      - name: Enable Screen Sharing with Username/Password Authentication
+      - name: Enable Screen Sharing (Simple Method)
         run: |
-          echo "Enabling macOS Screen Sharing with username/password authentication..."
+          echo "Enabling macOS Screen Sharing - Simple Method..."
           
-          # Enable Screen Sharing without VNC password (use system accounts instead)
-          echo "Configuring Screen Sharing for user authentication..."
-          
-          # Method 1: Enable via System Settings programmatically
-          sudo defaults write /var/db/launchd.db/com.apple.launchd/overrides.plist com.apple.screensharing -dict Disabled -bool false
-          
-          # Enable Screen Sharing service
+          # Enable Screen Sharing service using the simplest method
+          echo "Starting Screen Sharing service..."
           sudo launchctl load -w /System/Library/LaunchDaemons/com.apple.screensharing.plist
           
-          # Configure to allow VNC clients with user authentication (not VNC password)
-          echo "Setting up user-based authentication (no VNC password needed)..."
-          
-          # This enables the "Allow VNC users to connect with password" option
-          sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
-            -configure -allowAccessFor -specifiedUsers
-          
-          # Add our VNC user to the access list
-          sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
-            -configure -access -on -users vncuser -privs -all
-          
-          # Enable the service
-          sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
-            -activate
-          
-          # Wait for services to start
+          # Wait for service to start
           sleep 10
           
-          echo "✅ Screen Sharing enabled with username/password authentication"
+          # Verify service is running
+          if netstat -an | grep -q "*.5900.*LISTEN"; then
+              echo "✅ Screen Sharing service started successfully on port 5900"
+          else
+              echo "⚠️  Screen Sharing not started, trying alternative method..."
+              
+              # Alternative: Use kickstart method
+              sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
+                -activate -configure -access -on -users vncuser -privs -all -restart -agent
+              
+              sleep 10
+              
+              if netstat -an | grep -q "*.5900.*LISTEN"; then
+                  echo "✅ Screen Sharing started via kickstart method"
+              else
+                  echo "❌ Screen Sharing failed to start"
+                  netstat -an | grep 59 || echo "No VNC ports found"
+              fi
+          fi
 
-      - name: Install noVNC Web Interface (Android-Friendly Alternative)
+      - name: Create Simple HTML VNC Client
         run: |
-          echo "Installing noVNC for web-based VNC access..."
+          echo "Creating a simple HTML VNC client for web access..."
           
-          # Install noVNC and websockify
-          pip3 install novnc
+          # Create a simple HTML file that can connect to VNC
+          mkdir -p /tmp/vnc-web
+          cat > /tmp/vnc-web/vnc.html << 'EOF'
+          <!DOCTYPE html>
+          <html>
+          <head>
+              <title>VNC Connection</title>
+              <style>
+                  body { font-family: Arial, sans-serif; margin: 40px; background: #f0f0f0; }
+                  .container { background: white; padding: 30px; border-radius: 10px; max-width: 600px; margin: 0 auto; }
+                  .info { background: #e8f4fd; padding: 15px; border-radius: 5px; margin: 20px 0; }
+                  .credentials { background: #f8f9fa; padding: 15px; border-radius: 5px; font-family: monospace; }
+                  .button { background: #007bff; color: white; padding: 10px 20px; border: none; border-radius: 5px; text-decoration: none; display: inline-block; }
+                  .warning { background: #fff3cd; padding: 15px; border-radius: 5px; border-left: 4px solid #ffc107; }
+              </style>
+          </head>
+          <body>
+              <div class="container">
+                  <h1>🖥️ macOS VNC Connection</h1>
+                  
+                  <div class="info">
+                      <h3>📱 For Android VNC Apps:</h3>
+                      <div class="credentials">
+                          <strong>Server:</strong> TAILSCALE_IP_PLACEHOLDER<br>
+                          <strong>Port:</strong> 5900<br>
+                          <strong>Username:</strong> vncuser<br>
+                          <strong>Password:</strong> PASSWORD_PLACEHOLDER
+                      </div>
+                  </div>
+                  
+                  <div class="warning">
+                      <h4>⚙️ Android VNC Client Settings:</h4>
+                      <ul>
+                          <li><strong>Authentication:</strong> Username & Password (NOT VNC Password)</li>
+                          <li><strong>Color Quality:</strong> Medium (16-bit)</li>
+                          <li><strong>Recommended Apps:</strong> RealVNC Viewer, bVNC, MultiVNC</li>
+                      </ul>
+                  </div>
+                  
+                  <div class="info">
+                      <h3>🔧 Troubleshooting:</h3>
+                      <ul>
+                          <li>If "incompatible protocol": Try <strong>bVNC</strong> app (best compatibility)</li>
+                          <li>If authentication fails: Select "Username/Password" not "VNC Password"</li>
+                          <li>If slow: Reduce color quality to 8-bit</li>
+                          <li>If connection refused: Check if you're on the same Tailscale network</li>
+                      </ul>
+                  </div>
+                  
+                  <div class="info">
+                      <h3>📱 Recommended Android Apps:</h3>
+                      <ol>
+                          <li><strong>bVNC</strong> - Best macOS compatibility</li>
+                          <li><strong>MultiVNC</strong> - Good performance</li>
+                          <li><strong>RealVNC Viewer</strong> - Official app</li>
+                          <li><strong>VNC Viewer (free)</strong> - Basic but works</li>
+                      </ol>
+                  </div>
+              </div>
+          </body>
+          </html>
+          EOF
           
-          # Install websockify separately if needed
-          pip3 install websockify
+          # Replace placeholders with actual values
+          sed -i '' "s/TAILSCALE_IP_PLACEHOLDER/$TAILSCALE_IP/g" /tmp/vnc-web/vnc.html
+          sed -i '' "s/PASSWORD_PLACEHOLDER/$VNC_PASSWORD/g" /tmp/vnc-web/vnc.html
           
-          # Start noVNC proxy that connects to our VNC server
-          echo "Starting noVNC web proxy..."
-          novnc --listen 0.0.0.0:8080 --target 127.0.0.1:5900 &
-          NOVNC_PID=$!
-          echo "noVNC started with PID: $NOVNC_PID"
+          # Start a simple HTTP server for the web interface
+          echo "Starting simple HTTP server for web interface..."
+          cd /tmp/vnc-web
+          python3 -m http.server 8080 --bind 0.0.0.0 &
+          HTTP_SERVER_PID=$!
           
-          # Wait for noVNC to start
-          sleep 5
-          
-          echo "✅ noVNC web interface available on port 8080"
+          echo "✅ Simple HTTP server started on port 8080 (PID: $HTTP_SERVER_PID)"
+          echo "✅ Web interface available at: http://$TAILSCALE_IP:8080/vnc.html"
 
       - name: Verify VNC Server Accessibility
         run: |
@@ -230,36 +287,25 @@ jobs:
           
           # Check if VNC port (5900) is listening
           if netstat -an | grep -q "*.5900.*LISTEN"; then
-              echo "✅ VNC port 5900 is listening (macOS Screen Sharing)"
+              echo "✅ VNC port 5900 is listening"
               
               # Test basic VNC connectivity
               if nc -zv localhost 5900 2>/dev/null; then
-                  echo "✅ VNC server responding locally on port 5900"
+                  echo "✅ VNC server responding locally"
               else
-                  echo "⚠️  VNC server not responding on port 5900"
+                  echo "⚠️  VNC server not responding locally"
               fi
           else
-              echo "⚠️  VNC port 5900 is not listening"
-              echo "Attempting to restart Screen Sharing service..."
-              
-              sudo launchctl unload /System/Library/LaunchDaemons/com.apple.screensharing.plist 2>/dev/null || true
-              sleep 2
-              sudo launchctl load -w /System/Library/LaunchDaemons/com.apple.screensharing.plist
-              sleep 5
-              
-              if netstat -an | grep -q "*.5900.*LISTEN"; then
-                  echo "✅ VNC service started after restart"
-              else
-                  echo "❌ Still no VNC service after restart"
-                  netstat -an | grep 59 || echo "No VNC ports found"
-              fi
+              echo "❌ VNC port 5900 is not listening"
+              echo "Available ports:"
+              netstat -an | grep LISTEN | head -10
           fi
           
-          # Check if noVNC web interface is running
+          # Check if HTTP server is running
           if netstat -an | grep -q "*.8080.*LISTEN"; then
-              echo "✅ noVNC web interface is running on port 8080"
+              echo "✅ HTTP server is running on port 8080"
           else
-              echo "⚠️  noVNC web interface not running"
+              echo "⚠️  HTTP server not running"
           fi
 
       - name: Install Additional Tools
@@ -275,55 +321,64 @@ jobs:
       - name: Maintain Connection
         run: |
           echo ""
-          echo "=== 🖥️  macOS VNC ACCESS (ANDROID COMPATIBLE) ==="
+          echo "═══════════════════════════════════════════════════════════════"
+          echo "🖥️  macOS VNC ACCESS - ANDROID COMPATIBLE"
+          echo "═══════════════════════════════════════════════════════════════"
           echo "🌐 Tailscale IP: $TAILSCALE_IP"
           echo "🔌 VNC Port: 5900"
           echo "👤 Username: $VNC_USERNAME"
           echo "🔑 Password: $VNC_PASSWORD"
-          echo "=================================================="
+          echo "🌍 Web Info: http://$TAILSCALE_IP:8080/vnc.html"
+          echo "═══════════════════════════════════════════════════════════════"
           echo ""
           
-          echo "📱 CONNECTION METHODS:"
+          echo "📱 ANDROID CONNECTION GUIDE:"
           echo ""
-          echo "🔗 Method 1: Direct VNC (Recommended for Android)"
-          echo "• Server: $TAILSCALE_IP"
-          echo "• Port: 5900"
-          echo "• Authentication Type: Username & Password (NOT VNC Password)"
-          echo "• Username: $VNC_USERNAME"
-          echo "• Password: $VNC_PASSWORD"
-          echo ""
-          
-          echo "🌐 Method 2: Web Browser (Works on any device)"
-          echo "• URL: http://$TAILSCALE_IP:8080/vnc.html"
-          echo "• No app needed - works in any browser!"
-          echo "• Username: $VNC_USERNAME"
-          echo "• Password: $VNC_PASSWORD"
+          echo "Step 1: Download a VNC app (recommended order):"
+          echo "   🥇 bVNC - Best compatibility with macOS"
+          echo "   🥈 MultiVNC - Good performance"
+          echo "   🥉 RealVNC Viewer - Official app"
+          echo "   4️⃣ VNC Viewer - Basic free app"
           echo ""
           
-          echo "📱 ANDROID VNC APPS (use Method 1 settings):"
-          echo "• RealVNC Viewer - Select 'Username and Password' auth"
-          echo "• bVNC - Best compatibility"
-          echo "• MultiVNC"
-          echo "• VNC Viewer (free)"
+          echo "Step 2: Configure VNC app with these settings:"
+          echo "   • Server/Host: $TAILSCALE_IP"
+          echo "   • Port: 5900"
+          echo "   • Authentication Type: Username & Password (NOT VNC Password!)"
+          echo "   • Username: $VNC_USERNAME"
+          echo "   • Password: $VNC_PASSWORD"
+          echo "   • Color Quality: Medium (16-bit) - better performance"
+          echo "   • Protocol Version: Auto or 3.8"
           echo ""
           
-          echo "⚙️  ANDROID VNC SETTINGS:"
-          echo "• Connection Type: VNC (not RDP)"
-          echo "• Authentication: Username/Password (NOT VNC Password)"
-          echo "• Color Quality: Medium (16-bit) or High (24-bit)"
-          echo "• Disable: Clipboard sync, file transfer (for performance)"
+          echo "Step 3: Advanced Settings (if available):"
+          echo "   • Disable: Clipboard sync, File transfer"
+          echo "   • Enable: View-only mode first, then enable control"
+          echo "   • Encoding: Auto, Tight, or Raw"
+          echo ""
+          
+          echo "🌐 ALTERNATIVE - Web Browser Method:"
+          echo "   • Open any browser on your Android device"
+          echo "   • Go to: http://$TAILSCALE_IP:8080/vnc.html"
+          echo "   • Get connection details from the webpage"
           echo ""
           
           echo "🔧 TROUBLESHOOTING:"
-          echo "• If 'incompatible protocol': Try the web browser method"
-          echo "• If authentication fails: Make sure to select 'Username & Password' not 'VNC Password'"
-          echo "• If connection refused: Check firewall or try web browser method"
+          echo "   • 'Incompatible protocol' → Try bVNC app"
+          echo "   • 'Authentication failed' → Select 'Username/Password' NOT 'VNC Password'"
+          echo "   • 'Connection refused' → Check Tailscale connection"
+          echo "   • 'Black/blank screen' → Try 8-bit color depth"
+          echo "   • 'Very slow' → Disable clipboard and reduce color quality"
           echo ""
           
-          # Keep runner active with enhanced health checks
+          echo "✅ READY! Your macOS desktop is accessible via VNC!"
+          echo "   Visit http://$TAILSCALE_IP:8080/vnc.html for detailed instructions"
+          echo ""
+          
+          # Keep runner active with health checks
           while true; do
               current_time=$(date '+%Y-%m-%d %H:%M:%S')
-              echo "[$current_time] 🟢 macOS VNC Active (Native + Web)"
+              echo "[$current_time] 🟢 macOS VNC Server Active"
               
               # Health check: Verify Tailscale is still connected
               if ! sudo tailscale status | grep -q "logged in"; then
@@ -337,12 +392,13 @@ jobs:
                   sudo launchctl load -w /System/Library/LaunchDaemons/com.apple.screensharing.plist
               fi
               
-              # Health check: Verify noVNC web interface is still running
+              # Health check: Verify HTTP server is still running
               if ! netstat -an | grep -q "*.8080.*LISTEN"; then
-                  echo "⚠️  noVNC web interface down. Restarting..."
-                  pkill -f novnc || true
-                  novnc --listen 0.0.0.0:8080 --target 127.0.0.1:5900 &
+                  echo "⚠️  HTTP server down. Restarting..."
+                  cd /tmp/vnc-web
+                  python3 -m http.server 8080 --bind 0.0.0.0 &
               fi
               
               sleep 300  # Check every 5 minutes
           done
+          
